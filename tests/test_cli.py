@@ -1,91 +1,94 @@
-import os
-import sys
-import zlib
+"""Smoke tests for the BA-Agent CLI."""
+
+from __future__ import annotations
+
+import json
 from pathlib import Path
 
-import pytest
-from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
+from typer.testing import CliRunner
 
-from paperqa import Docs
-from paperqa.agents import ask, build_index, main, search_query
-from paperqa.agents.models import AnswerResponse
-from paperqa.settings import Settings
-from paperqa.utils import pqa_directory
+from ba_agent import cli
+
+RUNNER = CliRunner()
 
 
-def test_can_modify_settings(capsys, stub_data_dir: Path) -> None:
-    rel_path_home_to_stub_data = Path("~") / stub_data_dir.relative_to(Path.home())
-
-    # This test depends on the unit_test config not previously existing
-    with pytest.raises(FileNotFoundError, match="unit_test"):
-        Settings.from_name("unit_test")
-
-    old_argv = sys.argv
-    try:
-        sys.argv = (
-            "paperqa -s debug --llm=my-model-foo"
-            f" --agent.index.paper_directory={rel_path_home_to_stub_data!s} save"
-            " unit_test"
-        ).split()
-        main()
-
-        captured = capsys.readouterr()
-        assert not captured.err
-        assert "Settings saved" in captured.out
-        settings = Settings.from_name("unit_test")
-        assert settings.llm == "my-model-foo"
-        assert settings.agent.index.paper_directory == str(rel_path_home_to_stub_data)
-
-        sys.argv = ["paperqa", "-s", "unit_test", "view"]
-        main()
-
-        captured = capsys.readouterr()
-        assert not captured.err
-        assert "my-model-foo" in captured.out
-    finally:
-        sys.argv = old_argv
-        os.unlink(pqa_directory("settings") / "unit_test.json")
-
-
-def test_cli_ask(agent_index_dir: Path, stub_data_dir: Path) -> None:
-    settings = Settings.from_name("debug")
-    settings.agent.index.index_directory = agent_index_dir
-    settings.agent.index.paper_directory = stub_data_dir
-    response = ask(
-        "How can you use XAI for chemical property prediction?", settings=settings
+def build_env(base_dir: Path) -> dict[str, str]:
+    data_dir = base_dir / "data"
+    metadata_dir = base_dir / "metadata"
+    quellen_dir = base_dir / "quellen"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    quellen_dir.mkdir(parents=True, exist_ok=True)
+    ieee_source = Path("metadata/ieee.csl")
+    (metadata_dir / "ieee.csl").write_text(
+        ieee_source.read_text(encoding="utf-8"),
+        encoding="utf-8",
     )
-    assert isinstance(response, AnswerResponse)
-    assert response.session.formatted_answer
+    (metadata_dir / "zotero.csl.json").write_text("[]", encoding="utf-8")
+    env = {
+        "DATA_DIR": str(data_dir),
+        "SOURCE_DIR": str(quellen_dir),
+        "PAGES_FILE": str(data_dir / "pages.jsonl"),
+        "CHUNK_FILE": str(data_dir / "chunks.jsonl"),
+        "INDEX_FILE": str(data_dir / "index.faiss"),
+        "EMBEDDING_FILE": str(data_dir / "embeddings.npz"),
+        "METADATA_FILE": str(data_dir / "sources.json"),
+        "BIB_FILE": str(metadata_dir / "zotero.csl.json"),
+        "CSL_FILE": str(metadata_dir / "ieee.csl"),
+    }
+    return env
 
-    search_result = search_query(
-        " ".join(response.session.formatted_answer.split()),
-        "answers",
-        settings,
+
+def test_cli_commands(tmp_path: Path, monkeypatch) -> None:
+    env = build_env(tmp_path)
+    source_dir = Path(env["SOURCE_DIR"])
+    sample = source_dir / "sample.txt"
+    sample.write_text(
+        "Künstliche Intelligenz verändert die Hochschullehre nachhaltig.",
+        encoding="utf-8",
     )
-    assert isinstance(search_result, list)
-    found_answer = search_result[0][0]
-    assert isinstance(found_answer, AnswerResponse)
-    assert found_answer.model_dump() == response.model_dump()
 
+    result_ingest = RUNNER.invoke(
+        cli.app, ["ingest", "--src", str(source_dir)], env=env
+    )
+    assert result_ingest.exit_code == 0
 
-def test_cli_can_build_and_search_index(
-    agent_index_dir: Path, stub_data_dir: Path
-) -> None:
-    rel_path_home_to_stub_data = Path("~") / stub_data_dir.relative_to(Path.home())
-    settings = Settings.from_name("debug")
-    settings.agent.index.paper_directory = rel_path_home_to_stub_data
-    settings.agent.index.index_directory = agent_index_dir
-    index_name = "test"
-    for attempt in Retrying(
-        stop=stop_after_attempt(3),
-        # zlib.error: Error -5 while decompressing data: incomplete or truncated stream
-        retry=retry_if_exception_type(zlib.error),
-    ):
-        with attempt:
-            build_index(index_name, stub_data_dir, settings)
-    result = search_query("XAI", index_name, settings)
-    assert isinstance(result, list)
-    assert len(result) == 1
-    assert isinstance(result[0][0], Docs)
-    assert all(d.startswith("Wellawatte") for d in result[0][0].docnames)
-    assert result[0][1] == "paper.pdf"
+    result_index = RUNNER.invoke(cli.app, ["index"], env=env)
+    assert result_index.exit_code == 0
+
+    result_ask = RUNNER.invoke(cli.app, ["ask", "--q", "Wie wirkt KI?"], env=env)
+    assert result_ask.exit_code == 0
+    assert "[1]" in result_ask.stdout
+
+    result_chapter = RUNNER.invoke(
+        cli.app,
+        ["chapter", "--title", "Einführung", "--topic", "KI"],
+        env=env,
+    )
+    assert result_chapter.exit_code == 0
+
+    review_file = tmp_path / "draft.md"
+    review_file.write_text("KI wirkt transformativ. [1]\n", encoding="utf-8")
+    env_with_file = dict(env)
+    result_review = RUNNER.invoke(
+        cli.app, ["review", "--in", str(review_file)], env=env_with_file
+    )
+    assert result_review.exit_code == 0
+    data = json.loads(result_review.stdout)
+    assert "warnings" in data
+
+    def fake_convert(markdown: Path, output: Path) -> None:
+        output.write_bytes(b"ok")
+
+    monkeypatch.setattr(
+        "ba_agent.export.Exporter.convert",
+        lambda self, markdown, output: fake_convert(markdown, output),
+    )
+    markdown_path = tmp_path / "doc.md"
+    markdown_path.write_text("Inhalt. [1]\n", encoding="utf-8")
+    output_path = tmp_path / "doc.docx"
+    result_export = RUNNER.invoke(
+        cli.app, ["export", str(markdown_path), str(output_path)], env=env
+    )
+    assert result_export.exit_code == 0
+    assert output_path.exists()
