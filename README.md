@@ -94,6 +94,151 @@ Question: Has anyone designed neural networks that compute with proteins or DNA?
 > such as predicting DNA-protein binding (Zeng2016Convolutional pages 1-2).
 > However, the primary focus remains on DNA-based computation.
 
+## BA-Agent (IEEE-konforme Bachelorarbeiten)
+
+Der BA-Agent erweitert PaperQA2 um einen deutschsprachigen, lokal betriebenen Workflow für Bachelorarbeiten. Alle Verarbeitungsschritte – von der Quellenaufnahme bis zur Ausgabe eines IEEE-konformen Literaturverzeichnisses – laufen ausschließlich auf Basis der Dateien im Verzeichnis `./quellen`.
+
+### Voraussetzungen
+
+- Python ≥ 3.11 (empfohlen wird eine frische virtuelle Umgebung oder ein Conda/Mamba-Environment)
+- Systempakete für PDF-Verarbeitung (unter Debian/Ubuntu: `sudo apt-get install poppler-utils libgl1`)
+- Pandoc ≥ 3.0, falls der Export nach DOCX/LaTeX genutzt werden soll
+- Optional: Tesseract OCR (`sudo apt-get install tesseract-ocr`) für bildbasierte PDF-Seiten
+
+### Installation & Setup
+
+```bash
+git clone https://github.com/Future-House/paper-qa
+cd paper-qa
+git checkout -b feat/ba-agent-ieee
+
+# virtuelle Umgebung aktivieren (Beispiel mit venv)
+python -m venv .venv
+source .venv/bin/activate
+
+# Projekt + Entwicklungs-Tools installieren
+pip install -e .[dev]
+pip install pymupdf sentence-transformers faiss-cpu typer streamlit pydantic \
+    citeproc-py python-dotenv pytest ruff mypy
+
+# Projektverzeichnisse vorbereiten
+mkdir -p quellen metadata data
+cp metadata/ieee.csl metadata/ieee.csl.backup  # IEEE-Stil sichern
+```
+
+> **Hinweis:** Für wiederholte Ausführungen können Umgebungsvariablen in einer `.env`-Datei festgelegt werden (siehe Abschnitt „Konfiguration“).
+
+### Konfiguration
+
+Die Standardeinstellungen werden in `ba_agent/config.py` verwaltet und können über Umgebungsvariablen überschrieben werden. Legen Sie eine `.env`-Datei im Projektstamm an, um Pfade oder Modelle anzupassen:
+
+```env
+PROJECT_NAME=ba-agent
+SOURCE_DIR=./quellen
+DATA_DIR=./data
+EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+TOP_K=5
+```
+
+Wichtige Dateien und Ordner:
+
+- `./quellen/`: Eingangsquellen (PDF, DOCX, TXT)
+- `./data/`: Persistenzschicht für Seiten (`pages.jsonl`), Chunks, Embeddings und den FAISS-Index
+- `./metadata/ieee.csl`: Zitationsstil für Citeproc
+- `./metadata/zotero.csl.json`: Bibliographische Metadaten (z. B. aus Zotero exportiert)
+
+### Workflow Schritt für Schritt
+
+1. **Quellen vorbereiten:** Legen Sie alle relevanten Dateien im Ordner `./quellen` ab. Die OCR-Verarbeitung wird automatisch angewendet, falls eine Seite kein extrahierbares Textlayer besitzt.
+2. **Ingestion:**
+   ```bash
+   ba-agent ingest --src ./quellen
+   ```
+   Extrahiert Text mit PyMuPDF, speichert Seitenmetadaten (Autor, Jahr, DOI) und legt sie in `data/pages.jsonl` ab.
+3. **Indexierung:**
+   ```bash
+   ba-agent index
+   ```
+   Erstellt aus den Seiten 800–1200 Zeichen große Chunks (100 Zeichen Überlappung), erzeugt Sentence-Transformer-Embeddings und speichert sie in einem FAISS-Index.
+4. **Fragen beantworten:**
+   ```bash
+   ba-agent ask --q "Wie beeinflusst KI die Hochschullehre?"
+   ```
+   Die Antwort basiert ausschließlich auf den indizierten Quellen und enthält automatisch nummerierte IEEE-Zitate.
+5. **Kapitel generieren:**
+   ```bash
+   ba-agent chapter --title "Einführung" --topic "KI in der Hochschullehre"
+   ```
+   Erstellt einen kapitelartigen Fließtext inklusive Belegstellen.
+6. **Review durchführen:**
+   ```bash
+   ba-agent review --in draft.md
+   ```
+   Prüft, ob alle Aussagen mit `[n]` bzw. `[n, p. x]` belegt sind, ob die Nummerierung lückenlos ist und meldet Stil- oder Logikprobleme im JSON-Format.
+7. **Export:**
+   ```bash
+   ba-agent export manuscript.md manuskript.docx
+   ```
+   Konvertiert Markdown via Pandoc nach DOCX oder LaTeX und hängt automatisch das IEEE-konforme Literaturverzeichnis an.
+
+### Streamlit UI
+
+Starten Sie die Weboberfläche, um Quellen hochzuladen, Fragen zu stellen und Antworten mit klickbaren Zitaten zu erhalten:
+
+```bash
+streamlit run src/ba_agent/ui.py
+```
+
+Die Oberfläche speichert hochgeladene Dateien in `./quellen` und nutzt denselben Ingest- und Index-Workflow wie die CLI. Antworten verlinken auf die jeweiligen Textstellen innerhalb der lokal gespeicherten Dokumente.
+
+### Automatische Literaturverwaltung
+
+- Die Datei `metadata/zotero.csl.json` enthält die bibliographischen Rohdaten (JSON-Export aus Zotero oder anderen Referenzmanagern).
+- Beim ersten Auftreten einer Quelle wird eine laufende Nummer vergeben und in der Antwort als `[n]` referenziert.
+- Citeproc-py formatiert die Einträge gemäß `metadata/ieee.csl`. Ein Beispielauszug:
+
+  ```text
+  [1] J. Müller and P. Schmidt, “Digitale Lernplattformen an Hochschulen”, Springer, 2021.
+  [2] A. Klein, “Adoption von E-Learning-Technologien”, IEEE Access, vol. 9, pp. 11045–11060, 2022.
+  ```
+
+### Anpassung & Erweiterung
+
+- **Chunking & Embeddings:** Passen Sie `CHUNK_MIN_SIZE`, `CHUNK_MAX_SIZE` oder `EMBEDDING_MODEL` in der `.env` an, um andere Modelle (z. B. `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`) zu verwenden.
+- **Reviewer-Regeln:** Die Prüflogik befindet sich in `src/ba_agent/review.py`. Ergänzen Sie eigene Heuristiken oder Stilrichtlinien nach Bedarf.
+- **Prompting:** Interne Prompts für Fragestellungen und Kapitel finden Sie in `docs/PROMPTS.md`. Änderungen wirken sich unmittelbar auf den generierten Text aus.
+- **CLI-Erweiterung:** Die Kommandozeilenbefehle werden mit Typer in `src/ba_agent/cli.py` definiert. Zusätzliche Optionen oder Subbefehle können hier hinzugefügt werden.
+
+### Qualitätssicherung
+
+Nach Änderungen empfiehlt sich der komplette Testlauf:
+
+```bash
+pytest
+ruff check
+mypy
+```
+
+Alle Tests für Zitatformate, Bibliographie-Konsistenz, Retrieval-Determinismus und CLI-Schnittstellen liegen im Ordner `tests/`.
+
+### Fehlerbehebung
+
+- **Leerer Index:** Stellen Sie sicher, dass `ba-agent ingest` vor `ba-agent index` ausgeführt wurde und dass `./quellen` mindestens eine Datei enthält.
+- **Fehlende Schriftarten in DOCX/LaTeX:** Installieren Sie die Pandoc-Erweiterungen bzw. TeX-Distribution (z. B. `texlive-full`), wenn Sonderzeichen fehlen.
+- **Langsame Embedding-Berechnung:** Nutzen Sie einen GPU-fähigen Sentence-Transformer oder reduzieren Sie die Dokumentmenge schrittweise.
+- **OCR-Probleme:** Prüfen Sie, ob Tesseract korrekt installiert ist und das Sprachpaket `deu` verfügbar ist (`sudo apt-get install tesseract-ocr-deu`).
+
+### Beispielausgabe
+
+Text: „Die Ergebnisse in [1] zeigen eine starke Korrelation, wohingegen [2, p. 45] eine gegenteilige Beobachtung beschreibt.“
+
+Literaturverzeichnis:
+
+```text
+[1] J. Müller and P. Schmidt, “Digitale Lernplattformen an Hochschulen”, Springer, 2021.
+[2] A. Klein, “Adoption von E-Learning-Technologien”, IEEE Access, vol. 9, pp. 11045–11060, 2022.
+```
+
 ## What is PaperQA2
 
 PaperQA2 is engineered to be the best agentic RAG model for working with scientific papers.

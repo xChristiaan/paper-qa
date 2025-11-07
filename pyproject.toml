@@ -36,13 +36,20 @@ dependencies = [
     "numpy",
     "paper-qa-pypdf",  # TODO: after https://peps.python.org/pep-0771/, make this opt-out if 'pymupdf' extra is specified`
     "pybtex",
+    "citeproc-py",
     "pydantic-settings",
     "pydantic~=2.0,>=2.10.1",  # Pin 2.10 for typing breaks
+    "python-dotenv",
     "rich",
     "setuptools",  # TODO: remove after release of https://bitbucket.org/pybtex-devs/pybtex/pull-requests/46/replace-pkg_resources-with-importlib
     "tantivy",
     "tenacity",
     "tiktoken>=0.4.0",
+    "pymupdf",
+    "sentence-transformers",
+    "faiss-cpu",
+    "typer",
+    "streamlit",
 ]
 description = "LLM Chain for answering questions from docs"
 dynamic = ["version"]
@@ -116,6 +123,7 @@ zotero = [
 
 [project.scripts]
 pqa = "paperqa.agents:main"
+ba-agent = "ba_agent.cli:run"
 
 [project.urls]
 issues = "https://github.com/Future-House/paper-qa/issues"
